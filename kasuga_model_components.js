@@ -167,6 +167,20 @@
         }
       }
     }
+    const diamondIds = new Set(), closedChains = new Set();
+    for (const diamond of data.diamonds || []) {
+      if (!diamond.id || diamondIds.has(diamond.id)) throw Error("diamonds: duplicate/empty id");
+      diamondIds.add(diamond.id);
+      if (diamond.first === diamond.second) throw Error("diamond: two different branches required");
+      for (const id of [diamond.first, diamond.second]) {
+        if (!ref(id, "diamond.branch").components?.ik) throw Error("diamond.branch: missing IK");
+        if (closedChains.has(id)) throw Error("diamond.branch: branch already belongs to a diamond");
+        closedChains.add(id);
+      }
+      finite(diamond.iterations ?? 64, "diamond.iterations", 1, 256);
+      if (!Number.isInteger(diamond.iterations ?? 64)) throw Error("diamond.iterations: integer required");
+      finite(diamond.tolerance ?? 0.01, "diamond.tolerance", 0.000001, 16);
+    }
     const bindingIndices = new Set();
     for (const b of data.bindings) {
       if (
@@ -674,6 +688,10 @@
       mapping.set(b.id, g);
     }
     const remap = (id) => mapping.get(id)?.uuid ?? id;
+    for (const diamond of Project.kasuga_metadata.diamonds || []) {
+      diamond.first = remap(diamond.first);
+      diamond.second = remap(diamond.second);
+    }
     for (const b of data.bones) {
       const g = mapping.get(b.id);
       g.kasuga_bone = clone(b);
@@ -993,6 +1011,7 @@
         "rod-controls",
       );
       advanced.append(helpers);
+      button("菱形闭环约束…", editDiamonds, advanced, "diamonds");
     }
     const basicFields = configMode === "ik"
       ? ["target", "root"]
@@ -1295,6 +1314,47 @@
     refreshConfig(true);
     configPanel.node.querySelector(".kasuga-status").textContent =
       `已创建 ${name}，关联 ${links.length} 根链节。拖动彩色箭头，再点“开始预览”。`;
+  }
+  function editDiamonds() {
+    const project = Project, ends = groupList().filter((g) => g.kasuga_components?.ik);
+    if (ends.length < 2) throw Error("请先为两条独立分支配置 IK");
+    const current = clone(Project.kasuga_metadata?.diamonds || []),
+      selected = selectedBones().filter((g) => g.kasuga_components?.ik),
+      options = Object.fromEntries(ends.map((g) => [g.uuid, g.name]));
+    const dialog = new Dialog({
+      id: "kasuga_diamonds", title: "菱形闭环约束",
+      form: {
+        entry: {type:"select",label:"闭环",value:"",options:{"":"新增闭环",...Object.fromEntries(current.map((d)=>[d.id,d.id]))}},
+        first: {type:"select",label:"分支 A 的 IK 末端",options,value:selected[0]?.uuid || ends[0].uuid},
+        second: {type:"select",label:"分支 B 的 IK 末端",options,value:selected[1]?.uuid || ends[1].uuid},
+        iterations: {type:"number",label:"闭环迭代次数",value:64,min:1,max:256},
+        tolerance: {type:"number",label:"闭合误差 / px",value:0.01,min:0.000001,max:16},
+        remove: {type:"checkbox",label:"删除选中的闭环",value:false},
+      },
+      onFormChange(result) {
+        if (this.lastEntry === result.entry) return;
+        this.lastEntry = result.entry;
+        const value = current.find((d) => d.id === result.entry);
+        if (value) this.setFormValues({...value,remove:false});
+      },
+      onConfirm(result) {
+        guarded(() => {
+          if (Project !== project) throw Error("项目已切换");
+          const diamonds = current.filter((d) => d.id !== result.entry);
+          if (!result.remove) diamonds.push({
+            ...(current.find((d) => d.id === result.entry) || {}),
+            id: result.entry || guid(), first:result.first,second:result.second,
+            iterations:result.iterations,tolerance:result.tolerance,
+          });
+          const data = capture(); data.diamonds = diamonds; validate(data);
+          stopPreview();Undo.initEdit({kasuga_metadata:true});
+          Project.kasuga_metadata = {...Project.kasuga_metadata,diamonds};
+          Undo.finishEdit("编辑 Kasuga 菱形闭环");Project.saved=false;
+          this.hide();refreshConfig(true);
+        })();
+      },
+    });
+    dialog.show();
   }
   function disposeEditor() {
     if (!editor) return;
@@ -2314,6 +2374,14 @@
       });
       const points = new THREE.Points(geometry, material);
       points.frustumCulled = false;
+      const viewport = new THREE.Vector2();
+      points.onBeforeRender = (renderer, scene, camera) => {
+        // THREE.Points omits the projection's focal scale; keep size in the
+        // same model units as the game's billboard diameter, also in ortho views.
+        const focal = Math.abs(camera.projectionMatrix.elements[5]);
+        material.size = (e.particle.size ?? 1) * focal *
+          (camera.isOrthographicCamera ? renderer.getSize(viewport).y * 0.5 : 1);
+      };
       overlay.add(points);
       particles.set(e.id, {
         state: particleState(),
@@ -2370,13 +2438,13 @@
     };
     let last = performance.now(),
       accumulator = 0;
-    const tick = () => {
+    const tick = (fixedDelta) => {
       if (Project !== project) {
         stopPreview();
         return;
       }
       const now = performance.now(),
-        dt = Math.max(0, Math.min((now - last) / 1000, 0.1));
+        dt = Math.max(0, Math.min(fixedDelta ?? (now - last) / 1000, 0.1));
       last = now;
       accumulator = Math.min(accumulator + dt, 0.1);
       restore();
@@ -2391,24 +2459,26 @@
           });
       }
       Canvas.scene.updateMatrixWorld(true);
-      for (const b of data.bones) {
+      const solveIk = (b, goal) => {
         const ik = b.components?.ik;
-        if (!ik) continue;
+        if (!ik) return;
         const end = groups.get(b.id)?.mesh,
           target = groups.get(ik.target)?.mesh;
-        if (!end || !target) continue;
+        if (!end || !target) return;
+        const destination = goal || worldPosition(target);
+        let previousResidual = Infinity;
         for (let n = 0; n < (ik.iterations ?? 32); n++) {
-          if (
-            worldPosition(end).distanceTo(worldPosition(target)) <
-            (ik.tolerance ?? 0.01)
-          )
-            break;
+          const residual = worldPosition(end).distanceTo(destination);
+          if (residual < (ik.tolerance ?? 0.01) ||
+              Math.abs(previousResidual - residual) < (ik.tolerance ?? 0.01) * 0.01) break;
+          previousResidual = residual;
           for (const link of [...ik.links].reverse()) {
+            if (link.min?.every((v, i) => v === 0 && link.max?.[i] === 0)) continue;
             const obj = groups.get(link.bone)?.mesh;
             if (!obj) continue;
             const origin = worldPosition(obj),
               a = worldPosition(end).sub(origin),
-              t = worldPosition(target).sub(origin);
+              t = destination.clone().sub(origin);
             if (a.lengthSq() < 1e-12 || t.lengthSq() < 1e-12) continue;
             a.normalize();
             t.normalize();
@@ -2434,6 +2504,22 @@
               obj.updateMatrixWorld(true);
             }
           }
+        }
+      };
+      const closed = new Set((data.diamonds || []).flatMap((d) => [d.first, d.second]));
+      for (const bone of data.bones) if (!closed.has(bone.id)) solveIk(bone);
+      for (const diamond of data.diamonds || []) {
+        const first = data.bones.find((b) => b.id === diamond.first),
+          second = data.bones.find((b) => b.id === diamond.second),
+          a = groups.get(first.id).mesh, b = groups.get(second.id).mesh,
+          goal = worldPosition(groups.get(first.components.ik.target).mesh)
+            .add(worldPosition(groups.get(second.components.ik.target).mesh)).multiplyScalar(0.5);
+        for (let i = 0; i < (diamond.iterations ?? 64); i++) {
+          solveIk(first, goal);
+          solveIk(second, goal);
+          const p = worldPosition(a), q = worldPosition(b);
+          if (p.distanceTo(q) <= (diamond.tolerance ?? 0.01)) break;
+          goal.copy(p).add(q).multiplyScalar(0.5);
         }
       }
       const steps = Math.min(12, Math.floor((accumulator + 1e-9) * 120));
@@ -2539,7 +2625,7 @@
     description:
       "骨骼 IK、物理参数、点状粒子源与 Blockbench 实时预览；三种 Minecraft JSON 格式内嵌组件。",
     icon: "account_tree",
-    version: "0.3.0",
+    version: "0.4.0",
     min_version: "4.12.0",
     variant: "both",
     tags: [
@@ -2561,6 +2647,12 @@
         }),
       );
       installConfigUI();
+      listen(Blockbench, "create_undo_save", ({save,aspects}) => {
+        if (aspects.kasuga_metadata) save.kasuga_metadata = clone(Project.kasuga_metadata || {});
+      });
+      listen(Blockbench, "load_undo_save", ({save}) => {
+        if (save.kasuga_metadata) Project.kasuga_metadata = clone(save.kasuga_metadata);
+      });
       for (const [id, name, icon, fn] of [
         ["kasuga_ik", "Kasuga：编辑 IK", "account_tree", editIk],
         [
@@ -2609,7 +2701,7 @@
         Blockbench,
         "render_frame",
         guarded(() => {
-          if (preview && !(Animator.open && Timeline.playing)) preview.tick();
+          if (preview && !preview.manual && !(Animator.open && Timeline.playing)) preview.tick();
           updateEditor();
         }),
       );
@@ -2617,7 +2709,7 @@
         Blockbench,
         "display_animation_frame",
         guarded(() => {
-          if (preview) preview.tick();
+          if (preview && !preview.manual) preview.tick();
         }),
       );
       for (const event of [

@@ -1,6 +1,6 @@
 {
   "name": "kasugalib-blockbench-plugin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Blockbench plugin for editing Kasuga model components",
   "private": true,
   "engines": {
@@ -10,6 +10,11 @@
     "test": "node --test test/components.test.cjs",
     "test:host": "node test/blockbench-smoke.cjs",
     "test:config": "node test/config-modes.cjs",
-    "record-demo": "node test/record-demo.cjs"
+    "record-demo": "node test/record-demo.cjs",
+    "qj:prepare": "node test/qj-demo.cjs",
+    "qj:publish": "node test/qj-publish.cjs",
+    "qj:film": "node test/qj-film.cjs",
+    "qj:tutorial": "node test/qj-tutorial.cjs",
+    "qj:video": "python3 test/qj-video.py"
   }
 }

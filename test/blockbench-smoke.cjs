@@ -440,6 +440,33 @@ const assert = require("node:assert/strict");
       Undo.undo();
       check(quickRoot.kasuga_components.physics.mass === 1 && quickMid.kasuga_components.physics.mass === 1, "quick batch undo was not atomic");
       KasugaModelComponents.validate(KasugaModelComponents.capture());
+      newProject(Formats.bedrock);
+      const diamondTarget = new Group({name:"diamond_target",origin:[0,16,0]}).init(), ends = [];
+      for (const [label,sign] of [["a",1],["b",-1]]) {
+        const base = new Group({name:`${label}_base`,origin:[0,0,0]}).init(),
+          mid = new Group({name:`${label}_mid`,origin:[sign*8,8,0]}).addTo(base).init(),
+          end = new Group({name:`${label}_end`,origin:[sign*16,0,0]}).addTo(mid).init();
+        end.kasuga_components={ik:{target:diamondTarget.uuid,links:[{bone:base.uuid},{bone:mid.uuid}],iterations:64,tolerance:0.001,max_step:180}};
+        ends.push(end);
+      }
+      ends[0].select();ends[1].multiSelect();updateSelection();KasugaModelComponents.enterConfigMode("ik");
+      panel.node.querySelector('[data-action="diamonds"]').click();
+      check(Dialog.open?.id === "kasuga_diamonds", "diamond editor missing");
+      Dialog.open.confirm();
+      check(Project.kasuga_metadata.diamonds.length === 1, "diamond editor did not save");
+      Undo.undo();check(!Project.kasuga_metadata.diamonds?.length,"diamond undo did not restore metadata");
+      Undo.redo();check(Project.kasuga_metadata.diamonds.length === 1,"diamond redo lost metadata");
+      KasugaModelComponents.startPreview();KasugaModelComponents.preview.tick(1/30);
+      check(ends[0].mesh.getWorldPosition(new THREE.Vector3()).distanceTo(ends[1].mesh.getWorldPosition(new THREE.Vector3())) < 0.02, "Blockbench diamond did not close");
+      const diamondSaved=Codecs.project.compile({raw:true}).kasuga_lib;
+      check(diamondSaved.diamonds.length===1,"codec lost diamond definition");
+      newProject(Formats.bedrock);
+      const imported=new Map();
+      for(const definition of diamondSaved.bones)imported.set(definition.id,
+        new Group({name:definition.name,origin:definition.pivot}).addTo(imported.get(definition.parent)||"root").init());
+      KasugaModelComponents.hydrate(diamondSaved,"bedrock");
+      KasugaModelComponents.validate(KasugaModelComponents.capture());
+      check(Project.kasuga_metadata.diamonds[0].first===Group.all.find((g)=>g.name==="a_end").uuid,"diamond references were not remapped to native bones");
       KasugaModelComponents.startPreview();
       Plugins.registered.kasuga_model_components.onunload();
       check(

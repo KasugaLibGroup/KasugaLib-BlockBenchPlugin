@@ -57,6 +57,24 @@ test("version, references, cycles, ordering and unknown data", () => {
     assert.throws(() => core.validate(bad));
   }
 });
+test("diamond constraints reference two distinct, exclusively owned IK branches", () => {
+  const data = rig();
+  data.bones.push(
+    {id:"base2",name:"base2",parent:null,pivot:[0,0,0],components:{}},
+    {id:"mid2",name:"mid2",parent:"base2",pivot:[-8,8,0],components:{}},
+    {id:"tip2",name:"tip2",parent:"mid2",pivot:[0,16,0],components:{ik:{target:"target",links:[{bone:"base2"},{bone:"mid2"}]}}},
+  );
+  data.diamonds = [{id:"closed",first:"tip",second:"tip2",tolerance:0.02,iterations:64,vendor:{keep:true}}];
+  assert.equal(core.validate(data), data);
+  for (const change of [
+    d => d.first = "missing", d => d.second = "tip", d => d.first = "mid",
+    d => d.iterations = 1.5, d => d.tolerance = -1,
+  ]) {
+    const bad=structuredClone(data); change(bad.diamonds[0]);assert.throws(()=>core.validate(bad));
+  }
+  const bad=structuredClone(data);bad.diamonds.push({...bad.diamonds[0],id:"other"});
+  assert.throws(()=>core.validate(bad));
+});
 
 test("batch component patches preserve unrelated bone data", () => {
   const data = rig();
