@@ -170,7 +170,23 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
         { model, filename },
       );
       await page.waitForTimeout(650);
-      await caption(`${filename} · IK 配置模式：直接点选菱形骨骼`);
+      await caption(`${filename} · IK 配置模式：水滴钝端为根，尖端为尾`);
+      const shape = await page.evaluate(() => {
+        const handles = KasugaModelComponents.editor.bones;
+        if (!handles.length) throw Error("No directional bone handles");
+        return handles.every((handle) => {
+          const attribute = handle.geometry.getAttribute("position");
+          let rootRadius = 0, tailRadius = 0, widestY = 0, widest = -1;
+          for (let i = 0; i < attribute.count; i++) {
+            const y = attribute.getY(i), radius = Math.hypot(attribute.getX(i), attribute.getZ(i));
+            if (Math.abs(y + 1) < 1e-5) rootRadius = Math.max(rootRadius, radius);
+            if (Math.abs(y - 1) < 1e-5) tailRadius = Math.max(tailRadius, radius);
+            if (radius > widest) { widest = radius; widestY = y; }
+          }
+          return rootRadius > .4 && tailRadius < 1e-5 && widestY < -.4;
+        });
+      });
+      assert.equal(shape, true, "Rendered bone geometry must distinguish the root and tail");
       await page.locator('[data-action="focus-bones"]').check();
       await page.waitForTimeout(600);
       const rod = filename.startsWith("qj")

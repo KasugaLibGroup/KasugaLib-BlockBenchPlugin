@@ -538,6 +538,12 @@
     destination.kasuga_lib = clone(data);
     return model;
   }
+  // Unit profile along local +Y: a flat, rounded root at -1 and a pointed tail at +1.
+  // Keep the endpoints unchanged so viewport picking and all drag transforms retain their frame.
+  function boneHandleProfile() {
+    return [[0, -1], [0.55, -1], [0.85, -0.9], [1, -0.65],
+      [0.9, -0.4], [0.65, 0], [0.35, 0.45], [0, 1]];
+  }
   const api = {
     validate,
     applyComponentBatch,
@@ -548,6 +554,7 @@
     stepParticles,
     distance,
     attachExtension,
+    boneHandleProfile,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof Plugin === "undefined") return;
@@ -1287,7 +1294,10 @@
         (!focusBones || picking || related.has(g)),
     )) {
       const mesh = makeMesh(
-        new THREE.OctahedronGeometry(1),
+        new THREE.LatheGeometry(
+          boneHandleProfile().map(([radius, y]) => new THREE.Vector2(radius, y)),
+          12,
+        ),
         selectedBones().includes(bone) ? 0xffc857 : 0x6bd6ee,
         0.72,
       );

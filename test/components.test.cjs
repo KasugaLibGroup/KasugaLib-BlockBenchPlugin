@@ -336,3 +336,22 @@ test("extension attachment changes only the namespaced key in every format", () 
     assert.deepEqual(model, original);
   }
 });
+
+
+test("bone handle has a broad blunt root and a single pointed tail", () => {
+  const profile = core.boneHandleProfile();
+  const minimum = Math.min(...profile.map((p) => p[1]));
+  const maximum = Math.max(...profile.map((p) => p[1]));
+  assert.equal(minimum, -1);
+  assert.equal(maximum, 1);
+  const base = profile.filter((p) => p[1] === minimum);
+  assert(base.some((p) => p[0] > 0.4), "root must have a flat, broad cap");
+  assert(profile.filter((p) => p[1] === maximum).every((p) => p[0] === 0), "tail must be a point");
+  const widest = profile.reduce((a, b) => a[0] > b[0] ? a : b);
+  assert((widest[1] - minimum) / (maximum - minimum) < 0.3, "widest part must be near the root");
+  for (const [radius, y] of profile) {
+    assert(Number.isFinite(radius) && Number.isFinite(y) && radius >= 0);
+  }
+  profile[0][0] = 99;
+  assert.notEqual(core.boneHandleProfile()[0][0], 99, "profile instances must be independent");
+});
