@@ -388,6 +388,58 @@ const assert = require("node:assert/strict");
         "project data leaked",
       );
       Codecs.project.parse(saved);
+      // The quick workflow must create a valid world-aligned target, including
+      // under rotated parents, and remain one complete undoable authoring edit.
+      newProject(Formats.bedrock);
+      const quickRoot = new Group({ name: "quick_root", origin: [3, 2, 1], rotation: [0, 0, 35] }).init(),
+        quickMid = new Group({ name: "quick_mid", origin: [3, 10, 1] }).addTo(quickRoot).init(),
+        quickEnd = new Group({ name: "quick_end", origin: [3, 18, 1] }).addTo(quickMid).init();
+      quickEnd.kasuga_components = { custom: { keep: true } };
+      Canvas.updateAll();
+      quickEnd.select();
+      KasugaModelComponents.enterConfigMode("ik");
+      check(!panel.node.querySelector('[data-section="advanced"]').open, "advanced settings should start folded");
+      Canvas.scene.updateMatrixWorld(true);
+      const expectedTarget = quickEnd.mesh.getWorldPosition(new THREE.Vector3());
+      panel.node.querySelector('[data-action="create-ik"]').click();
+      const quickIk = quickEnd.kasuga_components.ik,
+        targetId = quickIk?.target,
+        quickTarget = Group.all.find((g) => g.uuid === targetId);
+      check(quickTarget && quickTarget.parent === "root", "quick IK target must be independent");
+      check(quickIk.links.map((l) => l.bone).join() === [quickRoot.uuid, quickMid.uuid].join(), "quick IK chain order");
+      Canvas.scene.updateMatrixWorld(true);
+      check(quickTarget.mesh.getWorldPosition(new THREE.Vector3()).distanceTo(expectedTarget) < 1e-6, "quick target does not match rotated endpoint");
+      KasugaModelComponents.validate(KasugaModelComponents.capture());
+      Undo.undo();
+      check(!Group.all.some((g) => g.uuid === targetId) && !quickEnd.kasuga_components.ik, "quick IK undo must remove target and component together");
+      check(quickEnd.kasuga_components.custom.keep, "quick IK lost unrelated data");
+      Undo.redo();
+      check(Group.all.some((g) => g.uuid === targetId) && quickEnd.kasuga_components.ik.target === targetId, "quick IK redo lost references");
+      quickEnd.select();
+      KasugaModelComponents.enterConfigMode("ik");
+      const quickIterations = panel.node.querySelector('[data-field="iterations"] input[type="number"]');
+      quickIterations.value = "48";
+      quickIterations.dispatchEvent(new Event("input"));
+      panel.node.querySelector('[data-action="preview"]').click();
+      check(quickEnd.kasuga_components.ik.iterations === 48 && KasugaModelComponents.preview, "preview must apply pending edits first");
+      KasugaModelComponents.stopPreview();
+      quickRoot.select();
+      quickMid.multiSelect();
+      updateSelection();
+      KasugaModelComponents.enterConfigMode("physics");
+      panel.node.querySelector('[data-action="enable-physics"]').click();
+      check(quickRoot.kasuga_components.physics && quickMid.kasuga_components.physics, "quick physics batch failed");
+      quickMid.kasuga_components.physics.size = [2, 7, 2];
+      KasugaModelComponents.refreshConfig(true);
+      const quickMass = panel.node.querySelector('[data-field="mass"] input[type="number"]');
+      quickMass.value = "3";
+      quickMass.dispatchEvent(new Event("input"));
+      panel.node.querySelector('[data-action="preview"]').click();
+      check(quickRoot.kasuga_components.physics.mass === 3 && quickMid.kasuga_components.physics.mass === 3, "batch preview did not apply mass");
+      check(quickMid.kasuga_components.physics.size.join() === "2,7,2", "quick batch overwrote untouched mixed values");
+      Undo.undo();
+      check(quickRoot.kasuga_components.physics.mass === 1 && quickMid.kasuga_components.physics.mass === 1, "quick batch undo was not atomic");
+      KasugaModelComponents.validate(KasugaModelComponents.capture());
       KasugaModelComponents.startPreview();
       Plugins.registered.kasuga_model_components.onunload();
       check(
@@ -406,6 +458,7 @@ const assert = require("node:assert/strict");
         captures,
         previewImage,
         physicsMoved,
+        quickWorkflow: true,
         ikError: end.distanceTo(goal),
         elementCount: originalNodes,
       };

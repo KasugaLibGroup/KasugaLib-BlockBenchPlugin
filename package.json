@@ -1,6 +1,6 @@
 {
   "name": "kasugalib-blockbench-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Blockbench plugin for editing Kasuga model components",
   "private": true,
   "engines": {

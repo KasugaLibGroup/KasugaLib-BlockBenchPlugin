@@ -195,6 +195,7 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
           ? "dainji"
           : "tip";
       if (fixtureRoot && filename.startsWith("qj")) {
+        await page.locator('[data-section="advanced"] > summary').click();
         await page.locator('[data-action="rod-controls"]').click();
         await page.waitForTimeout(350);
         const created = await page.evaluate((rod) => {
@@ -219,7 +220,7 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
           return { tip: tip.name, target: goal.name };
         }, rod);
         await caption(
-          "点“目标骨骼 → 点选骨骼”，再点模型中的菱形；无需输入 UUID",
+          "点“目标骨骼 → 点选骨骼”，再点模型中的水滴；无需输入 UUID",
         );
         await page.locator('[data-action="pick-target"]').click();
         await clickBone(created.target);
@@ -269,8 +270,9 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
         results.push({ filename, ...evidence });
       }
       if (filename.startsWith("df11")) {
+        await page.locator('[data-section="advanced"]').evaluate((node) => { node.open = true; });
         await caption(
-          "选择父级：点“父级骨骼 → 点选骨骼”，再点模型上的父级菱形",
+          "选择父级：点“父级骨骼 → 点选骨骼”，再点模型上的父级水滴",
         );
         await page.locator('[data-action="pick-parent_group"]').click();
         await clickBone("bone12");
@@ -320,6 +322,9 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
         "physics handle did not update both bodies",
       );
       assert.equal(after.length, 2);
+      if (!fixtureRoot)
+        assert.ok(after.every((value, i) => value[1] > before[i][1]),
+          "dragging the Y handle upward must increase local Y");
       await page.evaluate(() => Undo.undo());
       assert.deepEqual(
         await page.evaluate(() =>
@@ -332,6 +337,16 @@ const fixtureRoot = process.env.KASUGA_PRIVATE_MODELS;
       await page.evaluate(() =>
         KasugaModelComponents.enterConfigMode("physics"),
       );
+      if (!fixtureRoot) {
+        await dragHandle(1, 0, -70);
+        const farther = await page.evaluate(() => Group.multi_selected.map((g) =>
+          g.kasuga_components.physics.position.slice()));
+        const ratio = (farther[0][1] - before[0][1]) / (after[0][1] - before[0][1]);
+        assert.ok(ratio > 1.6 && ratio < 2.5,
+          `doubling the mouse distance must scale the movement, got ${ratio}`);
+        await page.evaluate(() => Undo.undo());
+        await page.evaluate(() => KasugaModelComponents.enterConfigMode("physics"));
+      }
       const cancelledStart = await page.evaluate(() =>
         Group.multi_selected.map((g) =>
           g.kasuga_components.physics.position.slice(),

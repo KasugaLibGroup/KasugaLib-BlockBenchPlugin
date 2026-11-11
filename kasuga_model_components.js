@@ -837,6 +837,7 @@
   };
   let handleMode = "translate";
   let focusBones = false;
+  const advancedOpen = { ik: false, physics: false };
   function element(tag, attrs = {}, content) {
     const node = document.createElement(tag);
     Object.assign(node, attrs);
@@ -899,15 +900,49 @@
     const status = element(
       "p",
       { className: "kasuga-status" },
-      `已选择 ${bones.length} 根骨骼：${bones.map((b) => b.name).join("、") || "点击菱形骨骼或组"}`,
+      `已选择 ${bones.length} 根骨骼：${bones.map((b) => b.name).join("、") || "点击水滴骨骼或大纲中的组"}`,
     );
     root.append(status);
     const hint = element(
       "p",
       { className: "kasuga-hint" },
-      "Ctrl / ⌘ 或 Shift 多选。仅应用勾选的字段；混合值不自动覆盖。关系可在模型或骨骼树中点选。Esc 取消拾取 / 拖动。",
+      bones.length > 1
+        ? "修改参数会自动勾选，未修改的值保持各自设置。Ctrl / ⌘ 或 Shift 多选；Esc 取消拾取 / 拖动。"
+        : "选骨骼 → 创建组件 → 拖动并预览。修改参数后点“应用修改”或“应用并预览”；Esc 取消拾取 / 拖动。",
     );
     root.append(hint);
+    const quick = element("div", { className: "kasuga-row kasuga-quick" });
+    if (configMode === "ik") {
+      const hasIk = bones.length === 1 && bones[0].kasuga_components?.ik;
+      if (!hasIk)
+        button("一键创建 IK 目标", createIkTarget, quick, "create-ik").disabled =
+          bones.length !== 1 || !(bones[0]?.parent instanceof Group);
+      else
+        button(
+          "移动 IK 目标",
+          () => {
+            handleMode = "target";
+            rebuildEditor();
+          },
+          quick,
+          "move-target",
+        );
+      root.append(quick);
+      root.append(element("p", { className: "kasuga-hint" },
+        hasIk ? "拖动彩色箭头移动目标，再点预览查看骨骼跟随。"
+          : "先选有父级的末端骨骼，自动建立独立目标与祖先链。刚性连杆工具在高级设置中。"));
+    } else {
+      button(
+        "一键启用物理",
+        () => commitConfig({
+          fields: { ...panelState.fields, enabled: true },
+          values: { ...panelState.values, enabled: true },
+        }),
+        quick,
+        "enable-physics",
+      ).disabled = !bones.length || bones.every((b) => b.kasuga_components?.physics);
+      root.append(quick);
+    }
     const focusLabel = element("label", { className: "kasuga-label" }),
       focus = element("input", { type: "checkbox", checked: focusBones });
     focus.dataset.action = "focus-bones";
@@ -918,11 +953,11 @@
     focusLabel.append(focus, document.createTextNode(" 只显示所选与关联骨骼"));
     root.append(focusLabel);
     const tools = element("div", { className: "kasuga-row" });
-    for (const [id, label] of [
+    for (const [id, label] of configMode === "physics" ? [
       ["translate", "移动"],
       ["rotate", "旋转"],
       ["scale", "尺寸"],
-    ])
+    ] : [])
       button(
         label,
         () => {
@@ -932,9 +967,10 @@
         tools,
         id,
       );
-    button(
+    const previewButton = button(
       preview ? "停止预览" : "开始预览",
       () => {
+        if (!preview && Object.values(panelState.fields).some(Boolean)) commitConfig();
         startPreview();
         refreshConfig(true);
         rebuildEditor();
@@ -943,6 +979,11 @@
       "preview",
     );
     root.append(tools);
+    const advanced = element("details", { open: advancedOpen[configMode] });
+    advanced.dataset.section = "advanced";
+    advanced.append(element("summary", {}, "高级设置 · 枢轴、关节与精细参数"));
+    const mode = configMode;
+    advanced.ontoggle = () => { advancedOpen[mode] = advanced.open; };
     if (configMode === "ik") {
       const helpers = element("div", { className: "kasuga-row" });
       button(
@@ -951,17 +992,22 @@
         helpers,
         "rod-controls",
       );
-      button(
-        "移动 IK 目标",
-        () => {
-          handleMode = "target";
-          rebuildEditor();
-        },
-        helpers,
-        "move-target",
-      );
-      root.append(helpers);
+      advanced.append(helpers);
     }
+    const basicFields = configMode === "ik"
+      ? ["target", "root"]
+      : ["shape", "size", "mass", "angular_damping"];
+    const updatePending = () => {
+      const count = Object.values(panelState.fields).filter(Boolean).length;
+      const applyButton = root.querySelector('[data-action="apply"]');
+      if (applyButton) {
+        applyButton.textContent = bones.length > 1
+          ? `应用到 ${bones.length} 根骨骼${count ? `（${count} 项）` : ""}`
+          : "应用修改";
+        applyButton.disabled = !bones.length || !count;
+      }
+      previewButton.textContent = preview ? "停止预览" : count ? "应用并预览" : "开始预览";
+    };
     for (const [key, label, type, fallback, options] of configFields[
       configMode
     ]) {
@@ -974,9 +1020,11 @@
         enabled = element("input", {
           type: "checkbox",
           title: "把此字段应用到所选骨骼",
+          hidden: bones.length < 2,
         });
       enabled.onchange = () => {
         panelState.fields[key] = enabled.checked;
+        updatePending();
       };
       heading.append(
         enabled,
@@ -985,9 +1033,11 @@
       row.append(heading);
       panelState.values[key] = clone(value);
       const mark = (v) => {
+        stopPreview();
         enabled.checked = true;
         panelState.fields[key] = true;
         panelState.values[key] = v;
+        updatePending();
       };
       if (type === "bone") {
         const select = element("select");
@@ -1033,8 +1083,9 @@
           mark(type === "boolean" ? input.checked : input.valueAsNumber);
         row.append(input);
       }
-      root.append(row);
+      (basicFields.includes(key) ? root : advanced).append(row);
     }
+    root.append(advanced);
     const apply = element("div", { className: "kasuga-row kasuga-apply" });
     button(
       `应用到 ${bones.length} 根骨骼`,
@@ -1042,13 +1093,16 @@
       apply,
       "apply",
     ).disabled = !bones.length;
-    button("清除勾选", () => refreshConfig(true), apply, "reset");
+    button("放弃修改", () => refreshConfig(true), apply, "reset");
     root.append(apply);
+    updatePending();
+    const syncSection = element("details");
+    syncSection.append(element("summary", {}, "保存后同步到游戏"));
     const sync = element("div", { className: "kasuga-row" });
     button("自动同步设置", configureSync, sync, "sync-config");
     button("立即同步", () => syncToGame(Project), sync, "sync-now");
-    root.append(sync);
-    root.append(
+    syncSection.append(sync);
+    syncSection.append(
       element(
         "p",
         { className: "kasuga-hint" },
@@ -1057,6 +1111,7 @@
           : "同步未开启 · 游戏侧 /kasuga_models live start",
       ),
     );
+    root.append(syncSection);
     rebuildEditor();
   }
   function commitConfig(
@@ -1065,7 +1120,7 @@
     mode = configMode,
   ) {
     if (!Object.values(change.fields).some(Boolean))
-      throw Error("请勾选要应用的参数");
+      throw Error("请先修改参数；修改后会自动加入应用列表");
     stopPreview();
     const before = capture(),
       data = applyComponentBatch(before, ids, mode, change),
@@ -1100,7 +1155,7 @@
     picking = { field, bones: panelState.bones.slice(), project: Project };
     rebuildEditor();
     configPanel.node.querySelector(".kasuga-status").textContent =
-      "请点击目标骨骼的菱形、体块或骨骼树；Esc 取消";
+      "请点击目标骨骼的水滴、体块或骨骼树；Esc 取消";
   }
   function acceptBonePick(bone) {
     if (!picking || picking.project !== Project) return false;
@@ -1116,6 +1171,7 @@
     const row = configPanel.node.querySelector(`[data-field="${field}"]`);
     row.querySelector("select").value = bone.uuid;
     row.querySelector("input").checked = true;
+    row.querySelector("select").dispatchEvent(new Event("change"));
     selectBoneSet(bones);
     selectionKey = Project.uuid + ":" + configMode + ":" + bones.join();
     configPanel.node.querySelector(".kasuga-status").textContent =
@@ -1138,6 +1194,8 @@
   }
   function enterConfigMode(mode) {
     configMode = mode;
+    handleMode = mode === "ik" && selectedBones()[0]?.kasuga_components?.ik
+      ? "target" : "translate";
     Modes.options[`kasuga_${mode}_mode`].select();
     configPanel.folded = false;
     configPanel.update();
@@ -1203,7 +1261,40 @@
     selectBoneSet([tip.uuid]);
     refreshConfig(true);
     configPanel.node.querySelector(".kasuga-status").textContent =
-      "已创建杆端和目标。请先把杆端菱形移到真实销轴中心，再拖目标预览；刚性连杆不自动伸缩。";
+      "已创建杆端和目标。请先把杆端水滴移到真实销轴中心，再拖目标预览；刚性连杆不自动伸缩。";
+  }
+  function createIkTarget() {
+    const bones = selectedBones(), end = bones[0];
+    if (bones.length !== 1 || !(end.parent instanceof Group))
+      throw Error("请选择一根有父级的末端骨骼");
+    if (end.kasuga_components?.ik) throw Error("已有 IK，请直接移动目标或调整链根");
+    stopPreview();
+    const data = capture();
+    validate(data);
+    const links = [];
+    for (let parent = end.parent; parent instanceof Group; parent = parent.parent)
+      links.unshift({ bone: parent.uuid });
+    Canvas.scene.updateMatrixWorld(true);
+    const position = Canvas.scene.worldToLocal(worldPoint(end)).toArray();
+    let name = `${end.name}_IK目标`, suffix = 2;
+    while (groupList().some((g) => g.name === name)) name = `${end.name}_IK目标_${suffix++}`;
+    const target = new Group({ name, origin: position }),
+      ik = { ...DEFAULT_IK, target: target.uuid, links };
+    data.bones.find((b) => b.id === end.uuid).components.ik = clone(ik);
+    data.bones.push({ id: target.uuid, name, parent: null, pivot: position, components: {} });
+    validate(data);
+    const groups = [end];
+    Undo.initEdit({ groups, outliner: true });
+    target.init();
+    groups.push(target);
+    end.kasuga_components = { ...end.kasuga_components, ik };
+    Undo.finishEdit("创建 Kasuga IK 目标与祖先链");
+    Project.saved = false;
+    handleMode = "target";
+    selectBoneSet([end.uuid]);
+    refreshConfig(true);
+    configPanel.node.querySelector(".kasuga-status").textContent =
+      `已创建 ${name}，关联 ${links.length} 根链节。拖动彩色箭头，再点“开始预览”。`;
   }
   function disposeEditor() {
     if (!editor) return;
@@ -1599,8 +1690,10 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     let delta = point.clone().sub(d.start);
-    if (d.worldAxis && !d.rotating)
-      delta.copy(d.worldAxis).multiplyScalar(delta.dot(d.worldAxis));
+    if (d.worldAxis && !d.rotating) {
+      const amount = delta.dot(d.worldAxis);
+      delta.copy(d.worldAxis).multiplyScalar(amount);
+    }
     d.moved ||= delta.lengthSq() > 0.000001;
     for (const original of d.originals) {
       const bone = original.group;
@@ -1764,6 +1857,9 @@
       #panel_kasuga_components .kasuga-label input {margin-right:6px}
       #panel_kasuga_components .kasuga-status {color:var(--color-accent);padding:6px 0;white-space:normal}
       #panel_kasuga_components .kasuga-hint {font-size:11px;opacity:.72;white-space:normal}
+      #panel_kasuga_components details {margin:10px 0;border-top:1px solid var(--color-border);padding-top:8px}
+      #panel_kasuga_components summary {cursor:pointer;font-size:12px;padding:4px 0}
+      #panel_kasuga_components .kasuga-quick button {flex:1;min-height:32px;color:var(--color-accent)}
       #panel_kasuga_components select {max-width:100%;margin-right:5px}
       #panel_kasuga_components .kasuga-apply {position:sticky;bottom:0;background:var(--color-back);padding:6px 0}
       .kasuga-particle-palette .sp-palette {width:188px;overflow:visible;display:grid;grid-template-columns:repeat(6,28px);gap:2px}
@@ -2443,7 +2539,7 @@
     description:
       "骨骼 IK、物理参数、点状粒子源与 Blockbench 实时预览；三种 Minecraft JSON 格式内嵌组件。",
     icon: "account_tree",
-    version: "0.2.0",
+    version: "0.3.0",
     min_version: "4.12.0",
     variant: "both",
     tags: [
