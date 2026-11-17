@@ -36,6 +36,16 @@
       throw Error(`${path}: expected vector3`);
     v.forEach((n, i) => finite(n, `${path}[${i}]`));
   }
+  // Same artistic temperature fit as Kasuga's LightColor (Tanner Helland, 2012).
+  function lightTint(light) {
+    if (light.temperature === undefined) return light.color ?? "#ffffff";
+    const temperature = light.temperature / 100;
+    const red = temperature <= 66 ? 255 : 329.698727446 * Math.pow(temperature - 60, -.1332047592);
+    const green = temperature <= 66 ? 99.4708025861 * Math.log(temperature) - 161.1195681661
+      : 288.1221695283 * Math.pow(temperature - 60, -.0755148492);
+    const blue = temperature >= 66 ? 255 : temperature <= 19 ? 0 : 138.5177312231 * Math.log(temperature - 10) - 305.0447927307;
+    return "#" + [red, green, blue].map(value => Math.round(Math.max(0, Math.min(255, value))).toString(16).padStart(2, "0")).join("");
+  }
   function validate(data) {
     if (!data || data.version !== 1)
       throw Error("kasuga_lib.version: only version 1 is editable");
@@ -212,6 +222,23 @@
       vector(p.gravity ?? [0, 0, 0], "particle.gravity");
       if (!/^#[0-9a-f]{6}$/i.test(p.color ?? "#ff8844"))
         throw Error("particle.color: hex RGB");
+    }
+    if (data.lights !== undefined && !Array.isArray(data.lights)) throw Error("lights: array required");
+    for (const light of data.lights || []) {
+      if (!light.id || ids.has(light.id)) throw Error("lights: duplicate/empty id");
+      ids.add(light.id);
+      if (light.bone != null) ref(light.bone, "light.bone");
+      vector(light.position, "light.position");
+      vector(light.rotation, "light.rotation");
+      if (!["point", "area", "volumetric"].includes(light.type ?? "point")) throw Error("light.type");
+      if (!/^#[0-9a-f]{6}$/i.test(light.color ?? "#ffffff")) throw Error("light.color: hex RGB");
+      finite(light.intensity ?? 4, "light.intensity", 0, 1e6);
+      finite(light.range ?? 256, "light.range", .001, 1e6);
+      finite(light.width ?? 16, "light.width", .001, 1e6);
+      finite(light.height ?? 16, "light.height", .001, 1e6);
+      finite(light.density ?? .08, "light.density", 0, 100);
+      finite(light.anisotropy ?? 0, "light.anisotropy", -.9, .9);
+      if (light.temperature !== undefined) finite(light.temperature, "light.temperature", 1000, 40000);
     }
     return data;
   }
@@ -569,6 +596,7 @@
     distance,
     attachExtension,
     boneHandleProfile,
+    lightTint,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof Plugin === "undefined") return;
@@ -611,17 +639,25 @@
           rotation: l.rotation.slice(),
         };
       });
+    const lights = locatorList().filter((node) => node.kasuga_light?.type && node.export !== false).map((node) => ({
+      ...clone(node.kasuga_light), id: node.uuid, name: node.name,
+      bone: sourceGroup(node)?.uuid ?? null,
+      position: sub(node.position, sourceGroup(node)?.origin ?? [0, 0, 0]),
+      rotation: node.rotation.slice(),
+    }));
     return {
       ...clone(Project.kasuga_metadata || {}),
       version: Project.kasuga_metadata?.version ?? 1,
       bones,
       emitters,
+      lights,
       bindings: [],
     };
   }
   function active(data) {
     return (
       data.emitters.length ||
+      data.lights.length ||
       data.bones.some((b) => Object.keys(b.components).length) ||
       Object.keys(Project.kasuga_metadata || {}).length
     );
@@ -650,7 +686,7 @@
       data.bones.find((b) => b.id === node.uuid).components = clone(value);
     else
       Object.assign(
-        data.emitters.find((e) => e.id === node.uuid),
+        (property === "kasuga_light" ? data.lights : data.emitters).find((e) => e.id === node.uuid),
         value,
       );
     validate(data);
@@ -729,6 +765,13 @@
           .addTo(parent || "root")
           .init();
       l.kasuga_emitter = clone(e);
+    }
+    for (const light of data.lights || []) {
+      const parent = mapping.get(light.bone);
+      let node = locatorList().find((entry) => entry.uuid === light.id);
+      if (!node) node = new Locator({name: light.name || "light", position: add(light.position, parent?.origin ?? [0, 0, 0]),
+        rotation: light.rotation}, light.id).addTo(parent || "root").init();
+      node.kasuga_light = clone(light);
     }
     Canvas.updateAll();
   }
@@ -2062,6 +2105,62 @@
     }
     refreshConfig(true);
   }
+  let lightDialog;
+  function editLight() {
+    const node = Locator.selected?.find((entry) => entry.kasuga_light?.type);
+    if (!node) throw Error("请先选中 Kasuga 光源定位点。");
+    stopPreview();
+    validate(capture());
+    lightDialog?.delete();
+    const light = node.kasuga_light;
+    const colorpicker = new ColorPicker({id: "kasuga_light_color", name: "光源颜色", private: true, palette: true, value: light.color ?? "#ffffff"});
+    colorpicker.jq.spectrum("option", "showAlpha", false);
+    lightDialog = new Dialog({
+      id: "kasuga_light", title: `光源 · ${node.name}`,
+      form: {
+        enabled: {label: "启用", type: "checkbox", value: light.enabled !== false},
+        type: {label: "光源类型", type: "select", options: {point: "点光源", area: "矩形面光源", volumetric: "球形体积光"}, value: light.type ?? "point"},
+        color: {label: "颜色 / HEX", type: "color", colorpicker, value: light.color ?? "#ffffff"},
+        use_temperature: {label: "使用色温（覆盖颜色）", type: "checkbox", value: light.temperature !== undefined},
+        temperature: {label: "色温（K）", type: "number", value: light.temperature ?? 6500, min: 1000, max: 40000},
+        intensity: {label: "强度", type: "number", value: light.intensity ?? 4, min: 0, max: 1e6},
+        range: {label: "作用半径（像素，16 = 1 方块）", type: "number", value: light.range ?? 256, min: .001, max: 1e6},
+        width: {label: "面光宽度（像素）", type: "number", value: light.width ?? 16, min: .001, max: 1e6},
+        height: {label: "面光高度（像素）", type: "number", value: light.height ?? 16, min: .001, max: 1e6},
+        two_sided: {label: "面光双面发光（默认局部 +Z）", type: "checkbox", value: !!light.two_sided},
+        density: {label: "体积介质密度（每方块）", type: "number", value: light.density ?? .08, min: 0, max: 100},
+        anisotropy: {label: "体积散射各向异性", type: "number", value: light.anisotropy ?? 0, min: -.9, max: .9},
+      },
+      onConfirm(result) {
+        guarded(() => {
+          const {use_temperature, ...values} = result;
+          values.color = typeof values.color === "string" ? values.color : values.color.toHexString();
+          const next = {...light, ...values};
+          if (!use_temperature) delete next.temperature;
+          saveNode(node, "kasuga_light", next, "编辑 Kasuga 光源");
+          this.hide();
+        })();
+      },
+    });
+    const oldDelete = lightDialog.delete;
+    lightDialog.delete = function () { colorpicker.delete(); oldDelete.call(this); };
+    lightDialog.show();
+  }
+  function addLight() {
+    stopPreview();
+    validate(capture());
+    const parent = Group.first_selected;
+    const objects = [];
+    Undo.initEdit({elements: objects, outliner: true});
+    const light = new Locator({name: "light", position: parent?.origin.slice() ?? [0, 0, 0],
+      kasuga_light: {type: "point", enabled: true, color: "#ffffff", intensity: 4, range: 256}})
+      .addTo(parent || "root").init();
+    objects.push(light);
+    light.select();
+    Undo.finishEdit("放置 Kasuga 光源");
+    Project.saved = false;
+    editLight();
+  }
   let emitterDialog;
   function editEmitter() {
     const node = Locator.selected?.find((l) => l.kasuga_emitter?.particle);
@@ -2258,7 +2357,7 @@
     const node = Group.first_selected || Locator.selected?.[0];
     if (!node) throw Error("请先选择骨骼或粒子源。");
     const property =
-      node instanceof Group ? "kasuga_components" : "kasuga_emitter";
+      node instanceof Group ? "kasuga_components" : node.kasuga_light?.type ? "kasuga_light" : "kasuga_emitter";
     new Dialog({
       id: "kasuga_json",
       title: "组件 JSON",
@@ -2355,6 +2454,20 @@
     const particles = new Map(),
       bodies = new Map(),
       poses = new Map();
+    const lightPreviews = [];
+    for (const light of data.lights || []) {
+      const node = locatorList().find((entry) => entry.uuid === light.id);
+      const color = lightTint(light);
+      const object = new THREE.Group();
+      const geometry = light.type === "area" ? new THREE.PlaneGeometry(light.width ?? 16, light.height ?? 16)
+        : new THREE.SphereGeometry(light.type === "volumetric" ? light.range ?? 256 : 2, 16, 10);
+      object.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({color, wireframe: true, transparent: true, opacity: .6, depthWrite: false})));
+      object.add(new THREE.PointLight(color, light.intensity ?? 4, light.range ?? 256, 2));
+      object.visible = light.enabled !== false;
+      object.name = "Kasuga light: " + light.id;
+      overlay.add(object);
+      lightPreviews.push({node, object});
+    }
     for (const e of data.emitters) {
       const positions = new Float32Array((e.max_particles ?? 256) * 3),
         geometry = new THREE.BufferGeometry();
@@ -2570,6 +2683,11 @@
           );
       }
       Canvas.scene.updateMatrixWorld(true);
+      for (const {node, object} of lightPreviews) {
+        if (!node?.mesh) { object.visible = false; continue; }
+        object.position.copy(node.mesh.getWorldPosition(new THREE.Vector3()));
+        object.quaternion.copy(node.mesh.getWorldQuaternion(new THREE.Quaternion()));
+      }
       for (const e of data.emitters) {
         const entry = particles.get(e.id),
           locator = entry.locator;
@@ -2623,9 +2741,9 @@
     title: "Kasuga Model Components",
     author: "KasugaLib contributors",
     description:
-      "骨骼 IK、物理参数、点状粒子源与 Blockbench 实时预览；三种 Minecraft JSON 格式内嵌组件。",
+      "骨骼 IK、物理、粒子源、可调色光源与 Blockbench 预览；三种 Minecraft JSON 格式内嵌组件。",
     icon: "account_tree",
-    version: "0.4.0",
+    version: "0.5.0",
     min_version: "4.12.0",
     variant: "both",
     tags: [
@@ -2645,6 +2763,7 @@
         new Property(Locator, "object", "kasuga_emitter", {
           default: () => ({}),
         }),
+        new Property(Locator, "object", "kasuga_light", {default: () => ({})}),
       );
       installConfigUI();
       listen(Blockbench, "create_undo_save", ({save,aspects}) => {
@@ -2663,6 +2782,8 @@
         ],
         ["kasuga_add_emitter", "Kasuga：新增粒子源", "flare", addEmitter],
         ["kasuga_edit_emitter", "Kasuga：编辑粒子源", "tune", editEmitter],
+        ["kasuga_add_light", "Kasuga：放置光源", "lightbulb", addLight],
+        ["kasuga_edit_light", "Kasuga：编辑光源", "tune", editLight],
         ["kasuga_component_json", "Kasuga：组件 JSON", "code", editJson],
         [
           "kasuga_preview",
@@ -2729,6 +2850,8 @@
         startPreview,
         stopPreview,
         hydrate,
+        addLight,
+        editLight,
         enterConfigMode,
         refreshConfig,
         beginBonePick,
@@ -2749,6 +2872,9 @@
       };
     },
     onunload() {
+      lightDialog?.hide();
+      lightDialog?.delete();
+      lightDialog = null;
       emitterDialog?.hide();
       emitterDialog?.delete();
       emitterDialog = null;
