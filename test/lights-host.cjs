@@ -1,0 +1,87 @@
+const {chromium} = require("playwright");
+const fs = require("node:fs");
+const path = require("node:path");
+
+(async () => {
+  const browser = await chromium.launch({executablePath: process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    headless: true, args: ["--use-angle=metal", "--no-sandbox"]});
+  try {
+    const page = await browser.newPage({viewport: {width: 1280, height: 900}});
+    const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("dialog", dialog => dialog.accept());
+    await page.goto(process.env.BLOCKBENCH_URL || "http://127.0.0.1:8794/");
+    await page.waitForFunction(() => typeof Codecs !== "undefined" && typeof Plugin !== "undefined");
+    await page.evaluate(async () => { if (Plugins.loading_promise) await Plugins.loading_promise; });
+    await page.evaluate(async content => new Plugin().loadFromFile({path: "kasuga_model_components.js",
+      name: "kasuga_model_components.js", content}, true), fs.readFileSync(path.join(__dirname, "../kasuga_model_components.js"), "utf8"));
+    const result = await page.evaluate(() => {
+      const check = (condition, message) => { if (!condition) throw Error(message); };
+      newProject(Formats.bedrock);
+      Project.name = "light_locator_demo";
+      Project.geometry_name = "light_locator_demo";
+      const bone = new Group({name: "lamp_mount", origin: [0, 16, 0]}).init();
+      bone.select();
+      BarItems.kasuga_add_light.click();
+      check(Dialog.open?.id === "kasuga_light", "Placement must open the light settings");
+      Dialog.open.setFormValues({type: "area", color: "#22aaff", intensity: 12, range: 192, width: 32, height: 16});
+      Dialog.open.confirm();
+      let locator = Locator.all.find(node => node.kasuga_light?.type);
+      check(locator && locator.parent === bone, "Placed light must be an owned native locator");
+      check(locator.kasuga_light.color === "#22aaff", "Color picker value was not saved");
+      const uuid = locator.uuid;
+      Undo.initEdit({elements: [locator]});
+      locator.position = [32, 24, 0];
+      locator.rotation = [0, 0, 90];
+      Undo.finishEdit("Move light");
+      check(KasugaModelComponents.capture().lights[0].position[0] === 32, "Locator translation was not captured");
+      Undo.undo();
+      check(Locator.all.find(node => node.uuid === uuid).position[0] === 0, "Light movement Undo failed");
+      Undo.redo();
+      locator = Locator.all.find(node => node.uuid === uuid);
+      check(locator.position[0] === 32 && locator.kasuga_light.color === "#22aaff", "Light movement Redo lost settings");
+      const compiled = Codecs.project.compile({raw: true});
+      check(compiled.kasuga_lib.lights[0].position[1] === 8, "Parent-local position conversion failed");
+      check(compiled.kasuga_lib.lights[0].rotation[2] === 90, "Rotation was not exported");
+      newProject(Formats.bedrock);
+      Codecs.project.parse(compiled, "lights.bbmodel");
+      locator = Locator.all.find(node => node.uuid === uuid);
+      check(locator && locator.kasuga_light.type === "area", "bbmodel round trip lost light");
+      locator.select();
+      BarItems.kasuga_edit_light.click();
+      Dialog.open.setFormValues({type: "volumetric", use_temperature: true, temperature: 2700});
+      Dialog.open.confirm();
+      check(locator.kasuga_light.temperature === 2700, "Optional temperature was not saved");
+      BarItems.kasuga_edit_light.click();
+      Dialog.open.setFormValues({use_temperature: false});
+      Dialog.open.confirm();
+      check(locator.kasuga_light.temperature === undefined && locator.kasuga_light.color === "#22aaff", "Disabling temperature lost HEX tint");
+      const duplicate = locator.duplicate();
+      const captured = KasugaModelComponents.capture();
+      check(captured.lights.length === 2 && new Set(captured.lights.map(light => light.id)).size === 2, "Native duplication lost light identity");
+      duplicate.remove();
+      KasugaModelComponents.startPreview();
+      check(KasugaModelComponents.preview.overlay.children.some(node => node.name === "Kasuga light: " + uuid), "Preview did not contain a light marker");
+      KasugaModelComponents.stopPreview();
+      check(!Canvas.scene.children.some(node => node.name === "Kasuga component preview"), "Preview cleanup leaked light objects");
+      locator = Locator.all.find(node => node.uuid === uuid);
+      locator.select();
+      BarItems.kasuga_edit_light.click();
+      Dialog.open.setFormValues({type: "point", intensity: 90, range: 240});
+      Dialog.open.confirm();
+      const model = Codecs.project.compile({raw: true});
+      locator.select();
+      BarItems.kasuga_edit_light.click();
+      check(Dialog.open?.id === "kasuga_light", "Final screenshot must show the light settings");
+      return {passed: true, model, captured: captured.lights};
+    });
+    const output = process.env.KASUGA_LIGHT_OUTPUT || path.join(__dirname, "../build/reports/lights");
+    fs.mkdirSync(output, {recursive: true});
+    fs.writeFileSync(path.join(output, "light_locator.bbmodel"), JSON.stringify(result.model, null, 2));
+    await page.screenshot({path: path.join(output, "light-settings.png")});
+    await page.evaluate(() => { Dialog.open?.hide(); Plugins.all.find(plugin => plugin.id === "kasuga_model_components").unload(); });
+    if (errors.length) throw Error("Blockbench page errors: " + errors.join("; "));
+    fs.writeFileSync(path.join(output, "report.json"), JSON.stringify({...result, model: undefined, errors}, null, 2));
+    console.log("PASS Blockbench light placement, color, movement, Undo/Redo, round trip, duplication and cleanup", output);
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

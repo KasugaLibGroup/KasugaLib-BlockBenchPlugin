@@ -38,6 +38,30 @@ const rig = () => ({
   bindings: [],
   emitters: [],
 });
+test("lights preserve color and authoring metadata and reject broken references or settings", () => {
+  assert.equal(core.lightTint({color: "#22aaff"}), "#22aaff");
+  assert.equal(core.lightTint({temperature: 2700}), "#ffa757");
+  const data = rig();
+  data.lights = [{id: "lamp", bone: "mid", type: "area", position: [0, 16, 0], rotation: [0, 0, 90],
+    color: "#55aaff", intensity: 8, range: 256, width: 32, height: 16, vendor: {kept: true}}];
+  assert.deepEqual(core.validate(data), data);
+  for (const change of [light => light.bone = "missing", light => light.type = "bad", light => light.color = "red",
+    light => light.range = 0, light => light.intensity = -1, light => light.temperature = 900,
+    light => light.density = NaN, light => light.anisotropy = 1, light => light.id = "base"]) {
+    const bad = JSON.parse(JSON.stringify(data));
+    change(bad.lights[0]);
+    assert.throws(() => core.validate(bad));
+  }
+  const duplicate = JSON.parse(JSON.stringify(data));
+  duplicate.lights.push({...duplicate.lights[0]});
+  assert.throws(() => core.validate(duplicate));
+  for (const kind of ["bbmodel", "java", "bedrock"]) {
+    const model = kind === "bedrock" ? {"minecraft:geometry": [{bones: []}]} : {elements: []};
+    core.attachExtension(model, data, kind);
+    const stored = kind === "bedrock" ? model["minecraft:geometry"][0].kasuga_lib : model.kasuga_lib;
+    assert.deepEqual(stored.lights, data.lights);
+  }
+});
 test("version, references, cycles, ordering and unknown data", () => {
   const r = rig();
   r.extension = { vendor: 42 };
